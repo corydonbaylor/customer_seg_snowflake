@@ -24,10 +24,12 @@ def main(session: snowpark.Session):
     article_ids = article_ids.with_column(
         "nodeid", row_number().over(Window.order_by("original_id")) + lit(1000000)
     )
-    
+
     # Combine both into a single nodes DataFrame
     nodes_df = customer_ids.union_all(article_ids)
-    
+
+    # drop original id
+    nodes_df = nodes_df.drop('original_id')    
     print(f"Total unique nodes count: {nodes_df.count()}")
     
     # Step 3: Create the 'relationships' DataFrame
@@ -39,15 +41,15 @@ def main(session: snowpark.Session):
         transactions_df["customerId"] == customer_ids["original_id"],
         "inner"
     ).select(
-        col("nodeid").alias("fromNodeid"),
+        col("nodeid").alias("sourcenodeid"),
         col("articleId")
     ).join(
         article_ids,
         col("articleId") == article_ids["original_id"],
         "inner"
     ).select(
-        col("fromNodeid"),
-        col("nodeid").alias("toNodeid")
+        col("sourcenodeid"),
+        col("nodeid").alias("targetnodeid")
     )
     
     print(f"Relationships DataFrame row count: {relationships_df.count()}")
@@ -61,18 +63,17 @@ def main(session: snowpark.Session):
     # Create the 'nodes' table
     session.sql("""
         CREATE TABLE nodes (
-            nodeid INT NOT NULL PRIMARY KEY,
-            original_id VARCHAR(256) NOT NULL
-        )
+            nodeid INT NOT NULL PRIMARY KEY
+            )
     """).collect()
     
     # Create the 'relationships' table
     session.sql("""
         CREATE TABLE relationships (
-            fromNodeid INT NOT NULL,
-            toNodeid INT NOT NULL,
-            FOREIGN KEY (fromNodeid) REFERENCES nodes(nodeid),
-            FOREIGN KEY (toNodeid) REFERENCES nodes(nodeid)
+            sourcenodeid INT NOT NULL,
+            targetnodeid INT NOT NULL,
+            FOREIGN KEY (sourcenodeid) REFERENCES nodes(nodeid),
+            FOREIGN KEY (targetnodeid) REFERENCES nodes(nodeid)
         )
     """).collect()
     
@@ -92,10 +93,12 @@ def main(session: snowpark.Session):
     # Verify table contents
     print("\nVerifying table contents:")
     print("Nodes table sample:")
+    # keeping this for debugging
     session.sql("SELECT * FROM nodes LIMIT 5").show()
-    
+    # then dropping original id
+    session.sql("ALTER TABLE nodes DROP COLUMN original_id")
+
     print("\nRelationships table sample:")
-    session.sql("SELECT * FROM relationships LIMIT 5").show()
     
     # Return a sample of the nodes DataFrame for verification
     return nodes_df.limit(10)
