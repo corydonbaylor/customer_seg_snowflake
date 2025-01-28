@@ -1,5 +1,6 @@
 import snowflake.snowpark as snowpark
-from snowflake.snowpark.functions import col
+from snowflake.snowpark.functions import col, row_number, lit
+from snowflake.snowpark.window import Window
 
 def main(session: snowpark.Session): 
     print("Starting main function...")
@@ -9,25 +10,44 @@ def main(session: snowpark.Session):
     transactions_df = session.table("transactions")
     print(f"Transactions table loaded. Row count: {transactions_df.count()}")
     
-    # Step 2: Create the 'nodes' DataFrame
-    print("Step 2: Creating nodes DataFrame...")
-    # Extract unique customerId and articleId values
-    customer_ids = transactions_df.select(col("customerId").cast("STRING").alias("nodeid")).distinct()
-    article_ids = transactions_df.select(col("articleId").cast("STRING").alias("nodeid")).distinct()
+    # Step 2: Create unique IDs for customerId and articleId
+    print("Step 2: Creating unique numeric IDs for customerId and articleId...")
     
-    print(f"Unique customer IDs count: {customer_ids.count()}")
-    print(f"Unique article IDs count: {article_ids.count()}")
+    # Extract unique customer IDs and assign a numeric ID starting from 1
+    customer_ids = transactions_df.select(col("customerId").cast("STRING").alias("original_id")).distinct()
+    customer_ids = customer_ids.with_column(
+        "nodeid", row_number().over(Window.order_by("original_id"))
+    )
     
-    # Combine customerId and articleId into a single column called 'nodeid'
-    nodes_df = customer_ids.union_all(article_ids).distinct()
+    # Extract unique article IDs and assign a numeric ID starting from 1,000,000
+    article_ids = transactions_df.select(col("articleId").cast("STRING").alias("original_id")).distinct()
+    article_ids = article_ids.with_column(
+        "nodeid", row_number().over(Window.order_by("original_id")) + lit(1000000)
+    )
+    
+    # Combine both into a single nodes DataFrame
+    nodes_df = customer_ids.union_all(article_ids)
     
     print(f"Total unique nodes count: {nodes_df.count()}")
     
     # Step 3: Create the 'relationships' DataFrame
     print("Step 3: Creating relationships DataFrame...")
-    relationships_df = transactions_df.select(
-        col("customerId").cast("STRING").alias("fromNodeid"),
-        col("articleId").cast("STRING").alias("toNodeid")
+    
+    # Join transactions with the numeric IDs for customers and articles
+    relationships_df = transactions_df.join(
+        customer_ids,
+        transactions_df["customerId"] == customer_ids["original_id"],
+        "inner"
+    ).select(
+        col("nodeid").alias("fromNodeid"),
+        col("articleId")
+    ).join(
+        article_ids,
+        col("articleId") == article_ids["original_id"],
+        "inner"
+    ).select(
+        col("fromNodeid"),
+        col("nodeid").alias("toNodeid")
     )
     
     print(f"Relationships DataFrame row count: {relationships_df.count()}")
@@ -41,15 +61,16 @@ def main(session: snowpark.Session):
     # Create the 'nodes' table
     session.sql("""
         CREATE TABLE nodes (
-            nodeid VARCHAR(256) NOT NULL PRIMARY KEY
+            nodeid INT NOT NULL PRIMARY KEY,
+            original_id VARCHAR(256) NOT NULL
         )
     """).collect()
     
     # Create the 'relationships' table
     session.sql("""
         CREATE TABLE relationships (
-            fromNodeid VARCHAR(256) NOT NULL,
-            toNodeid VARCHAR(256) NOT NULL,
+            fromNodeid INT NOT NULL,
+            toNodeid INT NOT NULL,
             FOREIGN KEY (fromNodeid) REFERENCES nodes(nodeid),
             FOREIGN KEY (toNodeid) REFERENCES nodes(nodeid)
         )
